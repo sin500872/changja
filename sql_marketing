@@ -1,0 +1,80 @@
+#セッションごとのパスの遷移を可視化。広告KWと連結
+#StandardSQL
+
+-- STEP 1: 対象となるセッションIDを特定
+WITH sessions_from_campaign AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id
+  FROM
+    `your_project_id.your_dataset_id.events_*`
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20250601' AND '20250703' -- 分析期間を修正してください
+    AND event_name = 'session_start'
+    AND traffic_source.name = '一般KW｜06.秋田'
+),
+
+-- STEP 2: セッションごとの流入キーワードを取得
+keyword_per_session AS (
+  SELECT
+    s.session_id,
+    -- session_startイベントから流入キーワードを取得します
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'term') AS keyword
+  FROM
+    `your_project_id.your_dataset_id.events_*` e
+  JOIN
+    sessions_from_campaign s ON (SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'ga_session_id') = s.session_id
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20250601' AND '20250703' -- 分析期間を修正してください
+    AND event_name = 'session_start'
+),
+
+-- STEP 3: セッションごとのページ閲覧履歴を取得
+page_views_in_session AS (
+  SELECT
+    s.user_pseudo_id,
+    s.session_id,
+    REGEXP_REPLACE(REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), r'https://[^/]+(.*)'), r'\?[^#]*', '') AS page_location,
+    ROW_NUMBER() OVER(PARTITION BY s.user_pseudo_id, s.session_id ORDER BY event_timestamp) as page_view_order
+  FROM
+    `your_project_id.your_dataset_id.events_*` e
+  JOIN
+    sessions_from_campaign s ON e.user_pseudo_id = s.user_pseudo_id AND (SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'ga_session_id') = s.session_id
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20250601' AND '20250703' -- 分析期間を修正してください
+    AND event_name = 'page_view'
+),
+
+-- STEP 4: セッションごとの最終ページ番号を計算
+session_last_page_order AS(
+  SELECT
+    session_id,
+    MAX(page_view_order) as last_order
+  FROM page_views_in_session
+  GROUP BY session_id
+)
+
+-- STEP 5: キーワードとページ遷移を結合してピボットテーブルを作成
+SELECT
+  k.keyword, -- キーワードの列を追加
+  p.session_id,
+  MAX(IF(p.page_view_order = 1, p.page_location, NULL)) AS page_1,
+  COALESCE(MAX(IF(p.page_view_order = 2, p.page_location, NULL)), IF(l.last_order = 1, '(Exit)', NULL)) AS page_2,
+  COALESCE(MAX(IF(p.page_view_order = 3, p.page_location, NULL)), IF(l.last_order = 2, '(Exit)', NULL)) AS page_3,
+  COALESCE(MAX(IF(p.page_view_order = 4, p.page_location, NULL)), IF(l.last_order = 3, '(Exit)', NULL)) AS page_4,
+  COALESCE(MAX(IF(p.page_view_order = 5, p.page_location, NULL)), IF(l.last_order = 4, '(Exit)', NULL)) AS page_5,
+  COALESCE(MAX(IF(p.page_view_order = 6, p.page_location, NULL)), IF(l.last_order = 5, '(Exit)', NULL)) AS page_6,
+  COALESCE(MAX(IF(p.page_view_order = 7, p.page_location, NULL)), IF(l.last_order = 6, '(Exit)', NULL)) AS page_7,
+  COALESCE(MAX(IF(p.page_view_order = 8, p.page_location, NULL)), IF(l.last_order = 7, '(Exit)', NULL)) AS page_8,
+  COALESCE(MAX(IF(p.page_view_order = 9, p.page_location, NULL)), IF(l.last_order = 8, '(Exit)', NULL)) AS page_9,
+  COALESCE(MAX(IF(p.page_view_order = 10, p.page_location, NULL)), IF(l.last_order = 9, '(Exit)', NULL)) AS page_10
+FROM
+  page_views_in_session AS p
+JOIN
+  session_last_page_order as l on p.session_id = l.session_id
+JOIN
+  keyword_per_session as k on p.session_id = k.session_id -- キーワードの情報を結合
+GROUP BY
+  k.keyword, p.session_id, l.last_order
+ORDER BY
+  k.keyword, p.session_id
